@@ -23,6 +23,62 @@ class GraphService:
         """
         self.engine = graph_engine
     
+    def get_agents_by_group(self, group_id: str) -> List[Any]:
+        """
+        获取特定群体（如班级）中的所有学生 Agent
+        
+        Args:
+            group_id: 群体ID (e.g., Class_A)
+            
+        Returns:
+            StudentAgent 实例列表
+        """
+        from app.core.agent_modeling import StudentAgent
+        
+        # 简单实现：查找所有 class_name 匹配的学生节点
+        agents = []
+        # 在实际生产中，这里应该使用图谱的批量查询功能
+        # 暂时通过遍历常见 ID 范围来模拟
+        for i in range(100):
+            student_id = f"S{i:03d}"
+            node = self.engine.get_node(student_id)
+            if node and node.get('properties', {}).get('class_name') == group_id:
+                props = node['properties'].copy()
+                props['student_id'] = student_id  # 确保 ID 存在
+                agent = StudentAgent.from_dict(props)
+                agents.append(agent)
+        
+        return agents
+
+    def get_concept_history(self, student_id: str, concept_name: str) -> Optional[Dict]:
+        """
+        获取学生在特定知识点上的历史表现
+        
+        Args:
+            student_id: 学生ID
+            concept_name: 知识点名称
+            
+        Returns:
+            包含 last_score 和 last_interaction_date 的字典
+        """
+        # 从学生节点的 interaction_history 属性中查找
+        node = self.engine.get_node(student_id)
+        if not node:
+            return None
+            
+        history = node.get('properties', {}).get('interaction_history', [])
+        relevant_records = [r for r in history if r.get('concept') == concept_name]
+        
+        if not relevant_records:
+            return None
+            
+        # 取最近的一次记录
+        latest = max(relevant_records, key=lambda x: x.get('date', ''))
+        return {
+            "last_score": latest.get('score', 0.5),
+            "last_interaction_date": latest.get('date')
+        }
+
     # ==================== 学生相关查询 ====================
     
     def get_student_profile(self, student_id: str) -> Optional[Dict[str, Any]]:

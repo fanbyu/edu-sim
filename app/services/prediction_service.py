@@ -4,6 +4,7 @@ Prediction Service
 """
 
 from typing import List, Dict, Any, Optional, Tuple
+from datetime import datetime
 import numpy as np
 from app.core.agent_modeling import IRTEngine, StudentAgent
 from app.services.graph_service import GraphService
@@ -196,6 +197,145 @@ class PredictionService:
             "trajectory": trajectory
         }
     
+    def predict_homework_impact(self, item_data: Dict[str, Any], 
+                               target_group: str = "class") -> Dict[str, Any]:
+        """
+        预测作业/试题对特定群体的影响（核心功能：事前预测）
+        
+        Args:
+            item_data: 试题数据 {id, difficulty, discrimination, concepts}
+            target_group: 目标群体 (class_id 或 school_id)
+            
+        Returns:
+            预测报告 {conclusion, mastery_gain, anxiety_risk, recommendations}
+        """
+        # 1. 获取群体学生画像
+        students = self.graph_service.get_agents_by_group(target_group)
+        if not students:
+            return {"error": f"未找到群体: {target_group}"}
+
+        results = []
+        for student in students:
+            # 2. 考虑教学进度和遗忘曲线调整能力值
+            dynamic_theta = self._apply_learning_context(student, item_data['concepts'])
+            
+            # 3. 仿真作答并记录心理变化
+            outcome = self._simulate_item_response(student, item_data, dynamic_theta)
+            results.append(outcome)
+            
+        # 4. 统计分析
+        avg_mastery_gain = np.mean([r['mastery_change'] for r in results])
+        avg_anxiety_change = np.mean([r['anxiety_change'] for r in results])
+        failure_rate = sum(1 for r in results if r['predicted_score'] == 0) / len(results)
+
+        # 5. 判定结论
+        conclusion = self._determine_impact(avg_mastery_gain, avg_anxiety_change)
+        
+        return {
+            "target_group": target_group,
+            "student_count": len(students),
+            "conclusion": conclusion,
+            "metrics": {
+                "avg_mastery_gain": round(float(avg_mastery_gain), 4),
+                "avg_anxiety_change": round(float(avg_anxiety_change), 4),
+                "predicted_failure_rate": round(float(failure_rate), 4)
+            },
+            "recommendations": self._generate_advice(conclusion, avg_anxiety_change)
+        }
+
+    def _apply_learning_context(self, student: StudentAgent, concepts: List[str]) -> float:
+        """
+        根据教学进度和历史表现动态调整学生能力值
+        
+        Args:
+            student: 学生 Agent 实例
+            concepts: 试题考察的知识点列表
+            
+        Returns:
+            调整后的动态能力值 (dynamic_theta)
+        """
+        base_theta = student.cognitive_level
+        now = datetime.now()
+        total_decay = 0.0
+        progress_boost = 0.0
+
+        for concept_name in concepts:
+            # 1. 获取知识点对应的历史掌握记录
+            history = self.graph_service.get_concept_history(student.student_id, concept_name)
+            if not history:
+                continue
+                
+            last_score = history.get('last_score', 0.5)
+            last_date_str = history.get('last_interaction_date')
+            
+            if last_date_str:
+                last_date = datetime.fromisoformat(last_date_str)
+                days_passed = (now - last_date).days
+                
+                # 2. 应用艾宾浩斯遗忘曲线 (Ebbinghaus Forgetting Curve)
+                # R = e^(-t/S), S 为记忆强度系数（假设与上次得分正相关）
+                strength_factor = 0.5 + last_score * 0.5
+                retention = np.exp(-days_passed / (30 * strength_factor))
+                total_decay += (1 - retention) * 0.2  # 遗忘导致的负面修正
+
+            # 3. 检查教学进度匹配度
+            concept_node = self.graph_service.engine.get_node_by_name(concept_name)
+            if concept_node:
+                props = concept_node.get('properties', {})
+                taught_date_str = props.get('taught_date')
+                if taught_date_str:
+                    taught_date = datetime.fromisoformat(teached_date_str)
+                    days_since_taught = (now - taught_date).days
+                    
+                    # 刚讲过的课（7天内）有短期记忆加成
+                    if days_since_taught <= 7:
+                        progress_boost += 0.15
+                    # 复习阶段（30天内）有适度加成
+                    elif days_since_taught <= 30:
+                        progress_boost += 0.05
+
+        # 综合调整：基础能力 - 遗忘衰减 + 进度加成
+        dynamic_theta = base_theta - total_decay + progress_boost
+        return max(-3.0, min(3.0, dynamic_theta))  # 限制在合理区间
+
+    def _simulate_item_response(self, student: StudentAgent, item: Dict, theta: float) -> Dict:
+        """模拟单次作答过程"""
+        prob = self.irt_engine.predict_probability(theta, item['difficulty'], item['discrimination'])
+        is_correct = 1 if np.random.random() < prob else 0
+        
+        # 心理因素模拟
+        anxiety_delta = -0.05 if is_correct else 0.1
+        mastery_delta = 0.02 if is_correct else -0.01
+        
+        return {
+            "student_id": student.student_id,
+            "predicted_score": is_correct,
+            "mastery_change": mastery_delta,
+            "anxiety_change": anxiety_delta
+        }
+
+    def _determine_impact(self, mastery_gain: float, anxiety_change: float) -> str:
+        """判定干预效果等级"""
+        if mastery_gain > 0.01 and anxiety_change < 0.05:
+            return "正向明显"
+        elif mastery_gain > 0:
+            return "正向不明显"
+        elif anxiety_change > 0.1:
+            return "负向（焦虑风险高）"
+        else:
+            return "无效"
+
+    def _generate_advice(self, conclusion: str, anxiety_risk: float) -> List[str]:
+        """生成给老师的建议"""
+        advice = []
+        if "负向" in conclusion:
+            advice.append("⚠️ 题目难度可能过高，建议增加引导性提示。")
+        if anxiety_risk > 0.08:
+            advice.append("💡 预计会引起部分学生焦虑，建议分层布置。")
+        if "无效" in conclusion:
+            advice.append("🔄 题目与当前学情匹配度低，建议更换考察点。")
+        return advice
+
     def recommend_optimal_intervention(self, student_id: str,
                                       available_strategies: List[str] = None) -> Dict[str, Any]:
         """

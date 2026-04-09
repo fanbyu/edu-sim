@@ -9,6 +9,10 @@ import sys
 import os
 from pathlib import Path
 from typing import Optional
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.text import Text
 
 # 设置 UTF-8 编码（Windows 兼容）
 if sys.platform == 'win32':
@@ -24,7 +28,76 @@ from app.core.data_ingestion import ExamDataLoader, EducationDataValidator, Grap
 from app.core.agent_modeling import IRTEngine
 from app.core.simulation import OasisAdapter, InterventionEngine, EducationEnv
 from app.services import GraphService, CalibrationService, PredictionService
+from app.services.item_parser import ItemParser
 
+
+def cmd_predict_homework(args):
+    """预测作业/试题对班级的影响"""
+    print("=" * 70)
+    print("🔮 作业前置评估预测")
+    print("=" * 70)
+    
+    # 初始化组件
+    engine = GraphEngine(backend_type=args.backend, config={"storage_path": args.graph_path})
+    engine.initialize()
+    graph_service = GraphService(engine)
+    prediction_service = PredictionService(graph_service)
+    item_parser = ItemParser()
+    
+    try:
+        # 1. 解析试题
+        print(f"\n1️⃣  正在解析试题...")
+        with open(args.item_file, 'r', encoding='utf-8') as f:
+            item_text = f.read()
+        
+        item_features = item_parser.parse_item(item_text, subject=args.subject)
+        print(f"   ✓ 难度: {item_features['difficulty']:.2f}")
+        print(f"   ✓ 知识点: {', '.join(item_features['concepts'])}")
+        
+        # 2. 执行预测
+        print(f"\n2️⃣  正在推演对 [{args.target_group}] 的影响...")
+        report = prediction_service.predict_homework_impact(
+            item_data=item_features,
+            target_group=args.target_group
+        )
+        
+        if "error" in report:
+            print(f"\n❌ 预测失败: {report['error']}")
+            return 1
+            
+        # 3. 输出可视化报告
+        console = Console()
+        
+        # 判定结论颜色
+        conclusion_style = "green" if "正向" in report['conclusion'] else "red" if "负向" in report['conclusion'] else "yellow"
+        conclusion_text = Text(report['conclusion'], style=conclusion_style)
+        
+        panel_content = f"[bold]🎯 综合结论:[/bold] {conclusion_text}\n"
+        panel_content += f"[bold]👥 覆盖人数:[/bold] {report['student_count']}\n"
+        panel_content += f"[bold]📈 预计掌握度增益:[/bold] {report['metrics']['avg_mastery_gain']:+.4f}\n"
+        panel_content += f"[bold]😰 预计焦虑变化:[/bold] {report['metrics']['avg_anxiety_change']:+.4f}\n"
+        panel_content += f"[bold]⚠️  预计不及格率:[/bold] {report['metrics']['predicted_failure_rate']:.1%}"
+        
+        console.print(Panel(panel_content, title="📊 作业前置评估报告", border_style="blue"))
+        
+        if report['recommendations']:
+            console.print("\n[bold cyan]💡 智能建议:[/bold cyan]")
+            for rec in report['recommendations']:
+                console.print(f"  • {rec}")
+        
+        # 保存 JSON 报告
+        if args.output:
+            with open(args.output, 'w', encoding='utf-8') as f:
+                json.dump(report, f, ensure_ascii=False, indent=2)
+            print(f"\n💾 报告已保存至: {args.output}")
+            
+        return 0
+        
+    except Exception as e:
+        print(f"\n❌ 发生错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
 
 def cmd_load_data(args):
     """加载考试数据到知识图谱"""
@@ -384,6 +457,9 @@ def main():
   edu-sim query --type overview
   edu-sim query --type student --id S001
   edu-sim query --type class --class-name Class_A
+  
+  # 预测作业影响
+  edu-sim predict-homework --item-file item.txt --target-group Class_A --subject math
         """
     )
     
@@ -404,6 +480,15 @@ def main():
     pred_parser.add_argument("--student-id", required=True, help="学生ID")
     pred_parser.add_argument("--intervention", help="干预策略类型")
     pred_parser.add_argument("--graph-path", default="data/graphs", help="图谱存储路径")
+    
+    # predict-homework 命令 (新增)
+    hw_parser = subparsers.add_parser("predict-homework", help="预测作业/试题对班级的影响")
+    hw_parser.add_argument("--item-file", required=True, help="试题文本文件路径")
+    hw_parser.add_argument("--target-group", required=True, help="目标群体 (班级ID或学校ID)")
+    hw_parser.add_argument("--subject", default="math", help="学科类型 (math, english...)")
+    hw_parser.add_argument("--output", help="JSON 报告输出路径")
+    hw_parser.add_argument("--graph-path", default="data/graphs", help="图谱存储路径")
+    hw_parser.add_argument("--backend", default="json", choices=["json", "graphify"], help="图谱后端类型")
     
     # simulate 命令
     sim_parser = subparsers.add_parser("simulate", help="运行教学仿真")
@@ -431,6 +516,7 @@ def main():
         "load-data": cmd_load_data,
         "calibrate": cmd_calibrate,
         "predict": cmd_predict,
+        "predict-homework": cmd_predict_homework,
         "simulate": cmd_simulate,
         "query": cmd_query,
     }

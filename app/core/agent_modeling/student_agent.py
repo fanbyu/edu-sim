@@ -4,7 +4,8 @@ Student Agent Model
 """
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
+from datetime import datetime
 import numpy as np
 
 
@@ -32,6 +33,10 @@ class StudentAgent:
     # 学习状态
     mastered_concepts: List[str] = field(default_factory=list)
     recent_performance: List[float] = field(default_factory=list)  # 最近10次得分
+    
+    # 历史表现记录 (用于学情追踪)
+    interaction_history: List[Dict[str, Any]] = field(default_factory=list) 
+    # 格式: [{"concept": str, "score": float, "date": str, "item_id": str}]
     
     # 社会属性
     class_name: Optional[str] = None
@@ -90,6 +95,54 @@ class StudentAgent:
             # 心理辅导: 显著降低焦虑,提升自信
             self.anxiety_threshold = max(0.0, self.anxiety_threshold - 0.2)
             self.personality = "confident"
+    
+    def record_interaction(self, item_id: str, concept: str, score: float):
+        """
+        记录一次学习交互（作答、练习等）
+        
+        Args:
+            item_id: 试题ID
+            concept: 考察的知识点
+            score: 得分 (0-1)
+        """
+        record = {
+            "item_id": item_id,
+            "concept": concept,
+            "score": score,
+            "date": datetime.now().isoformat()
+        }
+        self.interaction_history.append(record)
+        
+        # 同时更新近期表现列表
+        self.recent_performance.append(score)
+        if len(self.recent_performance) > 10:
+            self.recent_performance.pop(0)
+            
+        # 动态更新心理状态
+        if score < 0.4:
+            self.anxiety_threshold = min(1.0, self.anxiety_threshold + 0.05)
+            self.motivation_level = max(0.0, self.motivation_level - 0.03)
+        elif score > 0.8:
+            self.anxiety_threshold = max(0.0, self.anxiety_threshold - 0.02)
+            self.motivation_level = min(1.0, self.motivation_level + 0.05)
+
+    def get_concept_history(self, concept: str) -> Optional[Dict]:
+        """
+        获取特定知识点的历史掌握情况
+        
+        Returns:
+            包含 last_score 和 last_interaction_date 的字典
+        """
+        relevant_records = [r for r in self.interaction_history if r['concept'] == concept]
+        if not relevant_records:
+            return None
+            
+        # 取最近的一次记录
+        latest = max(relevant_records, key=lambda x: x['date'])
+        return {
+            "last_score": latest['score'],
+            "last_interaction_date": latest['date']
+        }
     
     def update_after_assessment(self, score: float, item_difficulty: float):
         """
