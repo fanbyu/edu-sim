@@ -1,5 +1,13 @@
 """
-LLM Client — CLI-only providers (Claude Code, Codex).
+LLM Client — CLI-only providers (Claude Code, Codex) and OpenAI-compatible APIs.
+
+支持的提供商:
+- claude-cli: Claude Code CLI
+- codex-cli: Codex CLI  
+- openai: OpenAI API (GPT-4, GPT-3.5)
+- qwen: 阿里云通义千问 (OpenAI 兼容)
+- doubao: 字节跳动豆包 (OpenAI 兼容)
+- any: 任意 OpenAI 兼容的 API
 """
 
 import json
@@ -9,6 +17,12 @@ import shutil
 import subprocess
 from typing import Optional, Dict, Any, List
 
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+
 from ..config import Config
 from .logger import get_logger
 
@@ -16,12 +30,74 @@ logger = get_logger('mirofish.llm_client')
 
 
 class LLMClient:
-    """LLM Client — supports claude-cli and codex-cli."""
+    """LLM Client — supports claude-cli, codex-cli, and OpenAI-compatible APIs."""
 
     def __init__(self, provider: Optional[str] = None):
         self.provider = (provider or Config.LLM_PROVIDER or "claude-cli").lower()
-        if self.provider not in ("claude-cli", "codex-cli"):
-            raise ValueError(f"Unsupported LLM provider: {self.provider!r}. Use 'claude-cli' or 'codex-cli'.")
+        
+        # 支持的提供商列表
+        supported_providers = (
+            "claude-cli", "codex-cli",
+            "openai", "qwen", "doubao", "any"
+        )
+        
+        if self.provider not in supported_providers:
+            raise ValueError(
+                f"Unsupported LLM provider: {self.provider!r}. "
+                f"Use one of: {', '.join(supported_providers)}"
+            )
+        
+        # 初始化 OpenAI 客户端（如果需要）
+        self.openai_client = None
+        if self.provider in ("openai", "qwen", "doubao", "any"):
+            if not OPENAI_AVAILABLE:
+                raise ImportError(
+                    "OpenAI library is required for API-based providers. "
+                    "Install it with: pip install openai"
+                )
+            self.openai_client = self._create_openai_client()
+    
+    def _create_openai_client(self) -> 'OpenAI':
+        """
+        创建 OpenAI 兼容 API 客户端
+        
+        支持的环境变量:
+        - OPENAI_API_KEY: API 密钥
+        - OPENAI_BASE_URL: API 基础 URL (可选)
+        - OPENAI_MODEL: 默认模型 (可选)
+        """
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError(
+                "OPENAI_API_KEY environment variable is required for API-based providers. "
+                "Set it in your .env file or export it in your shell."
+            )
+        
+        # 根据不同提供商设置默认配置
+        base_url = os.getenv("OPENAI_BASE_URL")
+        model = os.getenv("OPENAI_MODEL")
+        
+        if self.provider == "qwen":
+            # 通义千问
+            base_url = base_url or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            model = model or "qwen-plus"
+        elif self.provider == "doubao":
+            # 豆包
+            base_url = base_url or "https://ark.cn-beijing.volces.com/api/v3"
+            model = model or "doubao-pro-32k"
+        elif self.provider == "openai":
+            # OpenAI
+            base_url = base_url or "https://api.openai.com/v1"
+            model = model or "gpt-4o"
+        # "any" 使用用户自定义的 base_url 和 model
+        
+        client_kwargs = {
+            "api_key": api_key,
+            "base_url": base_url,
+        }
+        
+        logger.info(f"Initializing {self.provider} client with model: {model}")
+        return OpenAI(**client_kwargs), model
 
     def _split_system_message(self, messages: List[Dict[str, str]]):
         """Split system message from conversation messages."""
@@ -50,8 +126,10 @@ class LLMClient:
         max_tokens: int = 4096,
         response_format: Optional[Dict] = None
     ) -> str:
-        """Send a chat request via CLI."""
-        if self.provider == "codex-cli":
+        """Send a chat request via CLI or API."""
+        if self.provider in ("openai", "qwen", "doubao", "any"):
+            return self._chat_openai_api(messages, temperature, max_tokens, response_format)
+        elif self.provider == "codex-cli":
             return self._chat_codex_cli(messages, temperature, max_tokens, response_format)
         return self._chat_claude_cli(messages, temperature, max_tokens, response_format)
 
@@ -155,6 +233,49 @@ class LLMClient:
 
         except subprocess.TimeoutExpired:
             raise RuntimeError("Codex CLI timed out after 180s")
+    
+    def _chat_openai_api(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float,
+        max_tokens: int,
+        response_format: Optional[Dict] = None
+    ) -> str:
+        """
+        Chat via OpenAI-compatible API.
+        
+        支持 Qwen、豆包、OpenAI 等所有兼容 OpenAI API 的服务。
+        """
+        if not self.openai_client:
+            raise RuntimeError("OpenAI client not initialized")
+        
+        client, model = self.openai_client
+        
+        # 构建请求参数
+        request_kwargs = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        
+        # 如果需要 JSON 格式输出
+        if response_format and response_format.get("type") == "json_object":
+            request_kwargs["response_format"] = {"type": "json_object"}
+        
+        try:
+            logger.info(f"Calling {self.provider} API with model: {model}")
+            response = client.chat.completions.create(**request_kwargs)
+            
+            content = response.choices[0].message.content
+            if not content:
+                raise RuntimeError("Empty response from LLM API")
+            
+            return self._clean_content(content)
+        
+        except Exception as e:
+            logger.error(f"{self.provider} API error: {str(e)}")
+            raise RuntimeError(f"LLM API call failed: {str(e)}")
 
     def chat_json(
         self,
