@@ -228,7 +228,22 @@ class PredictionService:
         avg_anxiety_change = np.mean([r['anxiety_change'] for r in results])
         failure_rate = sum(1 for r in results if r['predicted_score'] == 0) / len(results)
 
-        # 5. 判定结论
+        # 5. 识别高风险学生 (Predicted Score == 0 且 焦虑显著上升)
+        high_risk_students = []
+        for r in results:
+            if r['predicted_score'] == 0 and r['anxiety_change'] > 0.05:
+                # 获取该学生在相关知识点上的历史表现
+                weak_report = self.analyze_weaknesses(r['student_id'])
+                related_weaknesses = [wc for wc in weak_report.get('weak_concepts', []) 
+                                      if wc['concept'] in item_data.get('concepts', [])]
+                
+                high_risk_students.append({
+                    "student_id": r['student_id'],
+                    "risk_reason": "答错且焦虑上升",
+                    "related_weaknesses": related_weaknesses
+                })
+
+        # 6. 判定结论
         conclusion = self._determine_impact(avg_mastery_gain, avg_anxiety_change)
         
         return {
@@ -240,7 +255,8 @@ class PredictionService:
                 "avg_anxiety_change": round(float(avg_anxiety_change), 4),
                 "predicted_failure_rate": round(float(failure_rate), 4)
             },
-            "recommendations": self._generate_advice(conclusion, avg_anxiety_change)
+            "high_risk_students": high_risk_students,
+            "recommendations": self._generate_advice(conclusion, avg_anxiety_change, high_risk_students)
         }
 
     def _apply_learning_context(self, student: StudentAgent, concepts: List[str]) -> float:
@@ -325,7 +341,7 @@ class PredictionService:
         else:
             return "无效"
 
-    def _generate_advice(self, conclusion: str, anxiety_risk: float) -> List[str]:
+    def _generate_advice(self, conclusion: str, anxiety_risk: float, high_risk_students: List = None) -> List[str]:
         """生成给老师的建议"""
         advice = []
         if "负向" in conclusion:
@@ -334,7 +350,70 @@ class PredictionService:
             advice.append("💡 预计会引起部分学生焦虑，建议分层布置。")
         if "无效" in conclusion:
             advice.append("🔄 题目与当前学情匹配度低，建议更换考察点。")
+        
+        if high_risk_students:
+            ids = ", ".join([s['student_id'] for s in high_risk_students[:5]])
+            advice.append(f"🚨 发现 {len(high_risk_students)} 名高风险学生 ({ids})，建议提前介入辅导。")
+            
         return advice
+
+    def analyze_weaknesses(self, student_id: str, threshold: float = 0.6) -> Dict[str, Any]:
+        """
+        分析学生的易错点和反复犯错的知识点
+        
+        Args:
+            student_id: 学生ID
+            threshold: 判定为“易错”的得分阈值 (默认 0.6)
+            
+        Returns:
+            包含薄弱知识点列表和建议的报告
+        """
+        # 获取学生画像
+        profile = self.graph_service.get_student_profile(student_id)
+        if not profile:
+            return {"error": f"学生 {student_id} 不存在"}
+            
+        history = profile.get('attributes', {}).get('interaction_history', [])
+        if not history:
+            return {"student_id": student_id, "weak_concepts": [], "message": "暂无作答记录"}
+
+        # 统计每个知识点的表现
+        concept_stats = {}
+        for record in history:
+            concept = record.get('concept')
+            score = record.get('score', 0)
+            if concept not in concept_stats:
+                concept_stats[concept] = {'scores': [], 'count': 0}
+            concept_stats[concept]['scores'].append(score)
+            concept_stats[concept]['count'] += 1
+
+        weak_concepts = []
+        for concept, stats in concept_stats.items():
+            avg_score = np.mean(stats['scores'])
+            error_rate = 1 - avg_score
+            
+            # 判定逻辑：平均分低于阈值 且 尝试次数 >= 2
+            if avg_score < threshold and stats['count'] >= 2:
+                weak_concepts.append({
+                    "concept": concept,
+                    "avg_score": round(float(avg_score), 4),
+                    "error_rate": round(float(error_rate), 4),
+                    "attempts": stats['count'],
+                    "severity": "高" if error_rate > 0.6 else "中"
+                })
+        
+        # 按错误率排序
+        weak_concepts.sort(key=lambda x: x['error_rate'], reverse=True)
+        
+        return {
+            "student_id": student_id,
+            "total_interactions": len(history),
+            "weak_concepts": weak_concepts,
+            "recommendations": [
+                f"建议针对 [{wc['concept']}] 进行专项练习 (错误率: {wc['error_rate']:.1%})" 
+                for wc in weak_concepts[:3]  # 取前三个最薄弱的点
+            ]
+        }
 
     def recommend_optimal_intervention(self, student_id: str,
                                       available_strategies: List[str] = None) -> Dict[str, Any]:
