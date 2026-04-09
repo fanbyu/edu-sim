@@ -28,6 +28,10 @@ _EXPORTS = {
     "SimulationRunner": (".simulation_runner", "SimulationRunner"),
     "SimulationRunState": (".simulation_runner", "SimulationRunState"),
     "RunnerStatus": (".simulation_runner", "RunnerStatus"),
+    # Phase 4: Service Layer
+    "GraphService": (".graph_service", "GraphService"),
+    "CalibrationService": (".calibration_service", "CalibrationService"),
+    "PredictionService": (".prediction_service", "PredictionService"),
     "AgentAction": (".simulation_runner", "AgentAction"),
     "RoundSummary": (".simulation_runner", "RoundSummary"),
     "GraphMemoryUpdater": (".graph_memory_updater", "GraphMemoryUpdater"),
